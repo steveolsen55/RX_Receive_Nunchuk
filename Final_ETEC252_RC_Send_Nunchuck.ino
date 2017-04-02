@@ -31,13 +31,10 @@ after the reading. This keeps the reading in a smaller range.
 #define TWI_FREQ 400000L
 
 #include <Wire.h>;
-byte i = 0;
+
 //------------------- Constants / Defines -------------------
 
 // ---- Wii Constants ----
-// Wii Nunchuk allowable value range. (Accelerometer)
-const int WII_NUNCHUK_MIN = 320;
-const int WII_NUNCHUK_MAX = 720;
 
 // Wii Joystick allowable value range.
 const int WII_JOYSTICK_MIN = 28;
@@ -52,12 +49,15 @@ const int GET_DATA_OK = 1;
 const int GET_DATA_FAIL = 0;
 
 //Button pins and value storage
-const byte CONTROLLER_BUTTON = 3;
 const byte DUMP_BUTTON = 4;
+const byte BOE_BUTTON = 5;
+const byte CONTROLLER_BUTTON = 3;
+
 int valbutton1;
 int valbutton2;
 int valbutton3;
-
+int UDvalue;
+int LRvalue;
 // ---- Delay and watch times, in milliSeconds ----
 const unsigned long TIME_BETWEEN_GET_DATA = 50;
 
@@ -71,13 +71,17 @@ receive code!
 */
 const long SERIAL_DATA_SPEED_38400_BPS = 38400;
 
+const int MOTOR_VALUE_STOP = 0;
+
 const int SERIAL_COMMAND_SET_RIGHT_MOTOR = 255;
 const int SERIAL_COMMAND_SET_LEFT_MOTOR = 254;
 const int SERIAL_COMMAND_SEND_TO_CONTROLLER = 253;
 const int SERIAL_COMMAND_SEND_TO_BOE = 252;
-const int SERIAL_COMMAND_ARM = 251;
+const int SERIAL_COMMAND_ARM_LE = 251;
+const int SERIAL_COMMAND_ARM_RL = 249;
 const int SERIAL_COMMAND_DUMP = 250;
 
+const int DEAD_ZONE = 15;
 // Normalized value range.
 const int NORMALIZED_RANGE_MIN = -100;
 const int NORMALIZED_RANGE_MAX = 100;
@@ -99,7 +103,7 @@ return = 0 if there was an error, non-zero if there was no error. Note that if t
 error, the pNormalizedX and pNormalizedY values cannot be trusted.
 */
 unsigned char getNormalizedInput(int* pNormalizedX, int* pNormalizedY);
-
+unsigned long previousTime;
 //------------------- Functions -------------------
 
 /*------
@@ -109,8 +113,8 @@ Description: Arduino setup hook, called once before the calls to loop() start.
 void setup()
 {
 	Serial.begin(SERIAL_DATA_SPEED_38400_BPS);
+  pinMode(BOE_BUTTON,INPUT_PULLUP);
   pinMode(DUMP_BUTTON,INPUT_PULLUP);
-
 	// Setup the Wii nunchuk power, and start communicating.
 	nunchuk_init();
 
@@ -123,291 +127,131 @@ Description: Arduino main loop, called over and over again... forever...
 */
 void loop()
 {
-
-
-
-	// Input Device data.
-	int normalized_x = 0;
-	int normalized_y = 0;
-
-	// Flag to signal when data needs servicing.
-	unsigned char processNewData = false;
-
-	// Get new Wii data on a schedule.
-	if (hasTimeoutExpired(lastGetDataTimer, TIME_BETWEEN_GET_DATA))
-	{
-		
-
-		//Serial.println(valbutton2);
-
-		static char lastWiiDataGood = false;
-
-		// If we lost communication with the Nunchuck, make sure it is re-configured.
-		if (false == lastWiiDataGood)
-		{
-			nunchuk_init();
-		}
-
-		// Good Wii Data - work with it. 
-		if (getNormalizedInput(&normalized_x, &normalized_y))
-		{
-			// let other code know we have updated the inputs.
-			processNewData = true;
-
-			// Record that we got good data.
-			lastWiiDataGood = true;
-
-			// if we got good data, reset our counter.
-			lastGetDataTimer = millis();
-
-			//Send signal to robot that buttons have been pressed
-			//SendButtonValues();
-		}
-		else
-		{
-			// Bad Wii Data - Stop the Slave.
-			lastWiiDataGood = false;
-
-			// Send zeros if we loose communication.
-			SendNewMotorValues(0, 0);
-
-			// Try again on our next scheduled time.
-			lastGetDataTimer = millis();
-
-
-		}
-	}
-
-	// Apply any additional formatting to our x and y data.
-	if (processNewData)
-	{
-		// Do Any needed preprocessing of the data.
-		applyFilterToInput(&normalized_x, &normalized_y);
-		applyDeadZone(&normalized_x, &normalized_y);
-
-		// Input Device data.
-		int motor_right = 0;
-		int motor_left = 0;
-
-		// Convert from joystick to motor values
-		convertInputToMotor(normalized_x, normalized_y, &motor_left, &motor_right);
-
-		// Send.
-		SendNewMotorValues(motor_left, motor_right);
-
-
-		// Clear the flag since we serviced this data.
-		processNewData = false;
-	}
-}
-
-/*------
-Function:  hasTimeoutExpired
-Description: Helper function for timers.
-*/
-bool hasTimeoutExpired(unsigned long counter, unsigned long timeout)
-{
-	return((millis() - counter) > timeout);
-}
-
-// See function description at the top of the file.
-unsigned char getNormalizedInput(int* pNormalizedX, int* pNormalizedY)
-{
-	unsigned char didWeGetData = GET_DATA_FAIL;
-
-	// Call the subroutine to read the data from the nunchuk, if we get new data.. process.
-	if (nunchuk_get_data())
-	{
-		didWeGetData = GET_DATA_OK;
+  if (millis() - previousTime >= TIME_BETWEEN_GET_DATA)
+  {
+      if (nunchuk_get_data())
+      {
+    	readJoysticks();
+        readButtons();        
+    	}
+     else
+     {
+       // if we didn't get any data, zero the x and y values in case someone uses them without checking.
+       UDvalue = 0;
+       LRvalue = 0;
+     }
+ }
  
-			static int joystick_x_offset = 120;
-			static int joystick_y_offset = 120;
-			// map the incoming values to a symmetric scale of NORMALIZED_RANGE_MIN to NORMALIZED_RANGE_MAX
-			*pNormalizedX = constrain(
-				(nunchuk_joyx() - joystick_x_offset),
-				NORMALIZED_RANGE_MIN,
-				NORMALIZED_RANGE_MAX
-				);
-
-			*pNormalizedY = constrain(
-				(nunchuk_joyy() - joystick_y_offset),
-				NORMALIZED_RANGE_MIN,
-				NORMALIZED_RANGE_MAX
-				);
-		}
+}
 	
-	else
-	{
-		// if we didn't get any data, zero the x and y values in case someone uses them without checking.
-		*pNormalizedX = 0;
-		*pNormalizedY = 0;
-	}
 
-	return didWeGetData;
-}
-
-/*------
-Function: applyFilterToInput
-Description: Apply a rolling average filter to the input values
-*/
-const unsigned char FILTER_BUFFER_SIZE = 2;
-void applyFilterToInput(int* pNormalizedX, int* pNormalizedY)
+//######################\ Read Push Buttons /################################//
+//================  =====================//
+void readButtons()
 {
-	static unsigned char index = 0;
-	static int xBuffer[FILTER_BUFFER_SIZE] = { 0 };
-	static int yBuffer[FILTER_BUFFER_SIZE] = { 0 };
-	static int xRollingFilterVal = 0;
-	static int yRollingFilterVal = 0;
+  if (! digitalRead(CONTROLLER_BUTTON)) {              
+    Serial.write(SERIAL_COMMAND_SEND_TO_CONTROLLER);
+    }
+    
+  if (!digitalRead(BOE_BUTTON)) {              
+    Serial.write(SERIAL_COMMAND_SEND_TO_BOE);
+  }
 
-	// Update our index to point to the oldest data.
-	index++;
-	if (index >= FILTER_BUFFER_SIZE) index = 0;
+  if (!digitalRead(DUMP_BUTTON)) {              
+    Serial.write(SERIAL_COMMAND_DUMP);
+  }
 
-	// remove this data from our rolling average.
-	xRollingFilterVal -= xBuffer[index] / FILTER_BUFFER_SIZE;
-	yRollingFilterVal -= yBuffer[index] / FILTER_BUFFER_SIZE;
-
-	// Overwrite the old data with the latest
-	xBuffer[index] = *pNormalizedX;
-	yBuffer[index] = *pNormalizedY;
-
-	// Add the new data to our rolling average.
-	xRollingFilterVal += xBuffer[index] / FILTER_BUFFER_SIZE;
-	yRollingFilterVal += yBuffer[index] / FILTER_BUFFER_SIZE;
-
-	// Return the data via the pointers we were passed.
-	*pNormalizedX = xRollingFilterVal;
-	*pNormalizedY = yRollingFilterVal;
+  if ( get_nunchuk_zbutton()) {              
+    Serial.write(SERIAL_COMMAND_ARM_RL);
+  }
+  
+   if (get_nunchuk_cbutton()) {              
+     Serial.write(SERIAL_COMMAND_ARM_LE);
+   }
 }
 
-/*------
-Function: applyDeadZone
-Description: Apply a dead zone in the middle of the input range.
-*/
-void applyDeadZone(int* pNormalizedX, int* pNormalizedY)
+//***********************************************************************  
+void readJoysticks()
 {
-	if (
-		(*pNormalizedX < NORMALIZED_DEAD_ZONE) &&
-		(*pNormalizedX > -NORMALIZED_DEAD_ZONE)
-		)
-	{
-		*pNormalizedX = 0;
-	}
-	else
-	{
-		// Adjust for the missing dead zone area.
-		int polarity = *pNormalizedX > 0 ? 1 : -1;
-		*pNormalizedX = map(
-			*pNormalizedX,
-			(NORMALIZED_DEAD_ZONE * polarity),
-			(NORMALIZED_RANGE_MAX * polarity),
-			(1 * polarity),
-			(NORMALIZED_RANGE_MAX * polarity)
-			);
-	}
-
-	if (
-		(*pNormalizedY < NORMALIZED_DEAD_ZONE) &&
-		(*pNormalizedY > -NORMALIZED_DEAD_ZONE)
-		)
-	{
-		*pNormalizedY = 0;
-	}
-	else
-	{
-		// Adjust for the missing dead zone area.
-		int polarity = *pNormalizedY > 0 ? 1 : -1;
-		*pNormalizedY = map(
-			*pNormalizedY,
-			(NORMALIZED_DEAD_ZONE * polarity),
-			(NORMALIZED_RANGE_MAX * polarity),
-			(1 * polarity),
-			(NORMALIZED_RANGE_MAX * polarity)
-			);
-	}
-}
-
-void arm_servo_control()
+  static int joystick_x_offset = 120;
+  static int joystick_y_offset = 120;
+  LRvalue = constrain((nunchuk_joyx() - joystick_x_offset),NORMALIZED_RANGE_MIN,NORMALIZED_RANGE_MAX);
+  UDvalue = constrain((nunchuk_joyy() - joystick_y_offset),NORMALIZED_RANGE_MIN,NORMALIZED_RANGE_MAX);
+  //Serial.print ("LRvalue = "); Serial.println(LRvalue);
+  DeadZone();
+  }
+//######################\ Dead Zone /################################//
+void DeadZone()
 {
-
+  if ((UDvalue >= -DEAD_ZONE && UDvalue <= DEAD_ZONE) && (LRvalue <=  DEAD_ZONE && LRvalue >= -DEAD_ZONE)) // The deadspot
+  {
+    // Stop motors if in the dead zone.
+    SendNewMotorValues(MOTOR_VALUE_STOP, MOTOR_VALUE_STOP);
+    previousTime = millis();
+  }
+  else                                    // If the joystick is not in the deadspot range then:
+  { // use the Y direction to set the forward and backward motion.
+    moveRobot(LRvalue, UDvalue);
+    previousTime = millis();
+  }
 }
-
-/*------
-Function: convertInputToMotor
-Description: Convert normalized x and y values and process left and right motor values.
-*/
-void  convertInputToMotor(int normalizedX, int normalizedY, int* pMotorLeft, int* pMotorRight)
+//*************** MoveRobot ***********************************************//
+void moveRobot (int valueX, int valueY)//subroutine to send pulses to the correct servo.
 {
-	// Use the Y direction to set the forward and backward motion.
-	*pMotorRight = normalizedY;
-	*pMotorLeft = normalizedY;
+  //Use the X direction to set the forward and backward motion
+  int leftMotorVal = valueY;
+  int rightMotorVal = valueY;
+  byte twist = 4; // Twist percentage
 
-	// Apply the X as a "twist" effect. (about 40% of the calculated value)
-	if (normalizedY >= 0)
-	{
-		*pMotorRight -= (normalizedX * 4) / 10;
-		*pMotorLeft += (normalizedX * 4) / 10;
-	}
+  // =============\ Creates a plus shape /============//
+  // Gives control to just the X axis if Y Axis is in the dead zone
+  if (valueY >= (-DEAD_ZONE + 2) && valueY <= (DEAD_ZONE - 2))
+  {
+    leftMotorVal = 0 + (valueX * 7.5) / 10; // Reduces twist effect to 75%
+    rightMotorVal = 0 - (valueX * 7.5) / 10; //  of whole speed.
+    //Serial.println("X only");
+  }
 
-	else
-	{
-		*pMotorRight += (normalizedX * 4) / 10;
-		*pMotorLeft -= (normalizedX * 4) / 10;
-	}
+  // Gives control to just the Y axis if X Axis is in the dead zone
+  else if (valueX >= (-DEAD_ZONE + 2) && valueX <= (DEAD_ZONE - 2))
+  {
+    leftMotorVal = valueY;
+    rightMotorVal = valueY;
+    //Serial.println("Y only");
+  }
 
-	*pMotorLeft = constrain(*pMotorLeft, NORMALIZED_RANGE_MIN, NORMALIZED_RANGE_MAX);
-	*pMotorRight = constrain(*pMotorRight, NORMALIZED_RANGE_MIN, NORMALIZED_RANGE_MAX);
+  //Apply the X as a "twist" effect. (about 30% or what ever twist is set to of the calculated value)
+  else if (valueY >= 0)
+  {
+    leftMotorVal = leftMotorVal + (valueX * twist) / 10;
+    rightMotorVal = rightMotorVal - (valueX * twist) / 10;
+  }
+  else
+  {
+    leftMotorVal = leftMotorVal - (valueX * twist) / 10;
+    rightMotorVal = rightMotorVal + (valueX * twist) / 10;
+  }
+
+  // Normalizes motorvals
+  leftMotorVal = constrain(leftMotorVal, -100, 100);
+  rightMotorVal = constrain(rightMotorVal, -100, 100);
+
+  SendNewMotorValues(leftMotorVal, rightMotorVal);
 }
-
-/*------
-Function: SendNewMotorValues
-Description: Sends a new Left and Right motor value to the Receive code. In this
-case we use the XBee for this task.
-*/
+//*************** Send Motor Values ***********************************************//
 void SendNewMotorValues(char left, char right)
 {
-	// Make sure we fit into a signed Char before sending.
-	left = constrain(left, -127, 128);
-	right = constrain(right, -127, 128);
 
-	// Send the new Motor Values.
-	Serial.write(SERIAL_COMMAND_SET_LEFT_MOTOR);
-	Serial.write(left);
+  Serial.write (SERIAL_COMMAND_SET_LEFT_MOTOR);
+  Serial.write (left);
 
-	//Serial.write(SERIAL_COMMAND_SET_RIGHT_MOTOR);
-	Serial.write(right);
-
-//  Serial.write(SERIAL_COMMAND_SEND_TO_BOE);
-  Serial.write(get_nunchuk_cbutton());
-//
-//  Serial.write(SERIAL_COMMAND_ARM);
-  Serial.write(get_nunchuk_zbutton());
-//
-//  Serial.write(SERIAL_COMMAND_DUMP);
-  Serial.write(digitalRead(DUMP_BUTTON));
-//
-//  Serial.write(SERIAL_COMMAND_SEND_TO_CONTROLLER);
-  Serial.write(digitalRead(CONTROLLER_BUTTON));
-
-
-//  Serial.print(SERIAL_COMMAND_SET_LEFT_MOTOR);
-//  Serial.print(left);
-//
-//  Serial.print(SERIAL_COMMAND_SET_RIGHT_MOTOR);
-//  Serial.print(right);
-//
-//  Serial.print(SERIAL_COMMAND_SEND_TO_BOE);
-//  Serial.print(get_nunchuk_cbutton());
-//
-//  Serial.print(SERIAL_COMMAND_ARM);
-//  Serial.print(get_nunchuk_zbutton());
-//
-//  Serial.print(SERIAL_COMMAND_DUMP);
-//  Serial.println(digitalRead(DUMP_BUTTON));
+  Serial.write (SERIAL_COMMAND_SET_RIGHT_MOTOR);
+  Serial.write (right);
+  
+//    Serial.print("left ");  Serial.print(left, DEC);
+//    Serial.print("\t");
+//    Serial.print("right ");  Serial.println(right, DEC);
 //  
-//  Serial.print(SERIAL_COMMAND_SEND_TO_CONTROLLER);
-//  Serial.print(digitalRead(CONTROLLER_BUTTON));
-
 }
 
 //------------------------------------------------------------------------------------------
@@ -492,7 +336,7 @@ void nunchuk_init()
 
 	// sends value of 0x00 to memory address 0x40
 	Wire.write(0x40);
-	Wire.write(i);
+	Wire.write(0);
 
 	// stop transmitting via i2c stop.
 	Wire.endTransmission();
@@ -508,7 +352,7 @@ void nunchuk_send_request()
 	Wire.beginTransmission(WII_NUNCHUK_I2C_ADDRESS);
 
 	// sending 0x00 sets the pointer back to the lowest address in order to read multiple bytes
-	Wire.write(i);
+	Wire.write(0);
 
 	// stop transmitting via i2c stop.
 	Wire.endTransmission();
@@ -621,24 +465,6 @@ Description: returns value of z-axis accelerometer
 */
 int nunchuk_accelz() { return process_nunchuck_accel(4, WII_NUNCHUCK_AZ_SHIFT); }
 
-//Send signal to robot that one of the 3 buttons has been pressed
-int SendButtonValues()
-{
-	//If button 1 has been pressed
-	if (valbutton1 <= 512)
-	{
-		Serial.write(SERIAL_COMMAND_ARM);
-	}
 
-	//If button 2 has been pressed
-	if (valbutton2 <= 512)
-	{
-		Serial.write(SERIAL_COMMAND_DUMP);
-	}
 
-	//If button 3 has been pressed
-	if (valbutton3 == 0);
-	{
-		Serial.write(SERIAL_COMMAND_SEND_TO_BOE);
-	}
-}
+
